@@ -393,7 +393,14 @@ public class UserService extends IUserService.Stub {
         addr instanceof java.net.Inet6Address
             ? android.system.OsConstants.AF_INET6
             : android.system.OsConstants.AF_INET;
-    java.io.FileDescriptor fd = android.system.Os.socket(family, type, 0);
+    java.io.FileDescriptor fd;
+    // label the socket like the calling app; a socket carrying our own (su/shell) label is rejected by SELinux once handed over
+    boolean labelled = _setSockCreateCon(_callerContext());
+    try {
+      fd = android.system.Os.socket(family, type, 0);
+    } finally {
+      if (labelled) _setSockCreateCon(null);
+    }
     try {
       // hidden Os.setsockoptIfreq is the only SO_BINDTODEVICE path without JNI
       org.lsposed.hiddenapibypass.HiddenApiBypass.invoke(
@@ -413,6 +420,38 @@ public class UserService extends IUserService.Stub {
       throw new IllegalStateException("bind to " + iface + ": " + cause);
     }
     return fd;
+  }
+
+  private static String _callerContext() {
+    int pid = Binder.getCallingPid();
+    if (pid <= 0 || pid == android.os.Process.myPid()) return null;
+    try (java.io.FileInputStream in = new java.io.FileInputStream("/proc/" + pid + "/attr/current")) {
+      byte[] buf = new byte[256];
+      int n = in.read(buf);
+      if (n <= 0) return null;
+      String ctx = new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8).trim();
+      int nul = ctx.indexOf('\0');
+      return nul >= 0 ? ctx.substring(0, nul) : ctx;
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  // null clears it; the attr is per-thread, so set and clear on the same binder thread
+  private static boolean _setSockCreateCon(String ctx) {
+    if (ctx == null) {
+      ctx = "\n";
+    } else if (ctx.isEmpty()) {
+      return false;
+    }
+    try (java.io.FileOutputStream out =
+        new java.io.FileOutputStream("/proc/thread-self/attr/sockcreate")) {
+      out.write(ctx.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      return true;
+    } catch (Exception e) {
+      Ln.w("sockcreate " + ctx.trim() + " failed: " + e.getMessage());
+      return false;
+    }
   }
 
   // interface whose subnet contains addr, never a VPN tunnel
